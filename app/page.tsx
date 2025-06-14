@@ -207,7 +207,7 @@ export default function CleanScriptLanding() {
                 <>
                   <h3 className="text-3xl font-bold mb-2">Behold! Your Clean Transcript 🎉</h3>
                   <p className="text-gray-400">
-                    Copy, share, or just admire how readable this is compared to YouTube's attempt
+                    Copy, share, or just admire how readable this is compared to YouTube attempt
                   </p>
                   {apiData?.data && (
                     <div className="flex items-center justify-center space-x-6 mt-4 text-sm text-gray-400">
