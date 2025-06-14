@@ -185,13 +185,12 @@ function simpleCleanTranscript(segments: TranscriptSegment[]): CleanedSegment[] 
 
 // Main processing function
 async function processYouTubeTranscript(youtubeUrl: string) {
-  // Create unique filename for this request
-  const audioPath = path.join(process.cwd(), 'tmp', `audio_${uuidv4()}.mp3`);
+  const audioPath = path.join('/tmp', `audio_${uuidv4()}.mp3`);
   console.log(
     `Audio will be saved to: ${audioPath}`
   );
   
-  // Ensure tmp directory exists
+  // Ensure temp directory exists
   const tmpDir = path.dirname(audioPath);
   if (!fs.existsSync(tmpDir)) {
     fs.mkdirSync(tmpDir, { recursive: true });
