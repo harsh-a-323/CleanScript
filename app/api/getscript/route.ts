@@ -50,8 +50,8 @@ async function downloadAudioToBuffer(youtubeUrl: string): Promise<Buffer> {
     // Add timeout to prevent hanging
     setTimeout(() => {
       stream.destroy();
-      reject(new Error('Audio download timeout after 90 seconds'));
-    }, 90000);
+      reject(new Error('Audio download timeout after 60 seconds'));
+    }, 60000);
   });
 }
 
@@ -151,7 +151,7 @@ Return only the JSON array, no additional text or explanation.`;
         headers: {
           'Content-Type': 'application/json',
         },
-        timeout: 80000 // 1 minute timeout
+        timeout: 60000 // 1 minute timeout
       }
     );
 
