@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import axios from 'axios';
-import fs from 'fs';
 import ytdl from '@distube/ytdl-core';
-import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 
 // Types for better structure
@@ -19,38 +17,74 @@ interface CleanedSegment {
   cleanedText?: string;
 }
 
-// Step 1: Download audio from YouTube
-async function downloadAudio(youtubeUrl: string, outputPath: string): Promise<void> {
+// Step 1: Download audio from YouTube (Memory-based, no file system)
+async function downloadAudioToBuffer(youtubeUrl: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const stream = ytdl(youtubeUrl, { filter: 'audioonly', quality: 'highestaudio' })
-      .pipe(fs.createWriteStream(outputPath));
-    stream.on('finish', resolve);
-    stream.on('error', reject);
+    const chunks: Buffer[] = [];
+    const stream = ytdl(youtubeUrl, { 
+      filter: 'audioonly', 
+      quality: 'highestaudio',
+      // Add these options for better compatibility
+      requestOptions: {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+      }
+    });
+
+    stream.on('data', (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+
+    stream.on('end', () => {
+      const audioBuffer = Buffer.concat(chunks);
+      console.log(`Audio buffer size: ${audioBuffer.length} bytes`);
+      resolve(audioBuffer);
+    });
+
+    stream.on('error', (error) => {
+      console.error('Stream error:', error);
+      reject(error);
+    });
+
+    // Add timeout to prevent hanging
+    setTimeout(() => {
+      stream.destroy();
+      reject(new Error('Audio download timeout after 60 seconds'));
+    }, 60000);
   });
 }
 
-// Step 2: Send audio to Deepgram API
-async function transcribeWithDeepgram(audioPath: string): Promise<any> {
-  const audioData = fs.readFileSync(audioPath);
-  const response = await axios.post(
-    'https://api.deepgram.com/v1/listen',
-    audioData,
-    {
-      headers: {
-        'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`,
-        'Content-Type': 'audio/mp3',
-      },
-      params: {
-        filler_words: true,   // Include filler words
-        smart_format: true,   // Improved formatting
-        punctuate: true,      // Add punctuation
-        utterances: true,     // Pause-based segmentation
-        utt_split: 5,        // Split utterances after 2 seconds of silence
-        words: true          // Include word-level timestamps
+// Step 2: Send audio buffer to Deepgram API
+async function transcribeWithDeepgram(audioBuffer: Buffer): Promise<any> {
+  try {
+    console.log('Sending audio to Deepgram...');
+    const response = await axios.post(
+      'https://api.deepgram.com/v1/listen',
+      audioBuffer,
+      {
+        headers: {
+          'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`,
+          'Content-Type': 'audio/mp3',
+        },
+        params: {
+          filler_words: true,
+          smart_format: true,
+          punctuate: true,
+          utterances: true,
+          utt_split: 5,
+          words: true
+        },
+        timeout: 120000, // 2 minutes timeout
+        maxContentLength: 100 * 1024 * 1024, // 100MB max
+        maxBodyLength: 100 * 1024 * 1024
       }
-    }
-  );
-  return response.data;
+    );
+    return response.data;
+  } catch (error: any) {
+    console.error('Deepgram API error:', error.response?.data || error.message);
+    throw new Error(`Deepgram transcription failed: ${error.response?.data?.message || error.message}`);
+  }
 }
 
 // Step 3: Clean transcript using Gemini AI
@@ -96,7 +130,7 @@ Please return ONLY a clean JSON array with this exact structure:
 
 Return only the JSON array, no additional text or explanation.`;
 
-    console.log("sending geminin the req...")
+    console.log("Sending request to Gemini...");
 
     const response = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
@@ -116,7 +150,8 @@ Return only the JSON array, no additional text or explanation.`;
       {
         headers: {
           'Content-Type': 'application/json',
-        }
+        },
+        timeout: 60000 // 1 minute timeout
       }
     );
 
@@ -183,26 +218,26 @@ function simpleCleanTranscript(segments: TranscriptSegment[]): CleanedSegment[] 
   });
 }
 
-// Main processing function
+// Main processing function (No file system usage)
 async function processYouTubeTranscript(youtubeUrl: string) {
-  // Create unique filename for this request
-  const audioPath = path.join(process.cwd(), 'tmp', `audio_${uuidv4()}.mp3`);
-  
-  // Ensure tmp directory exists
-  const tmpDir = path.dirname(audioPath);
-  if (!fs.existsSync(tmpDir)) {
-    fs.mkdirSync(tmpDir, { recursive: true });
-  }
+  const requestId = uuidv4().slice(0, 8);
+  console.log(`[${requestId}] Starting transcript processing for: ${youtubeUrl}`);
 
   try {
-    console.log('Downloading audio...');
-    await downloadAudio(youtubeUrl, audioPath);
+    console.log(`[${requestId}] Downloading audio to memory...`);
+    const audioBuffer = await downloadAudioToBuffer(youtubeUrl);
+    
+    if (audioBuffer.length === 0) {
+      throw new Error('Downloaded audio buffer is empty');
+    }
 
-    console.log('Transcribing with Deepgram...');
-    const transcriptionResult = await transcribeWithDeepgram(audioPath);
+    console.log(`[${requestId}] Audio downloaded successfully, size: ${(audioBuffer.length / 1024 / 1024).toFixed(2)}MB`);
+
+    console.log(`[${requestId}] Transcribing with Deepgram...`);
+    const transcriptionResult = await transcribeWithDeepgram(audioBuffer);
 
     // Safety check for utterances
-    if (!transcriptionResult.results.utterances) {
+    if (!transcriptionResult.results.utterances || transcriptionResult.results.utterances.length === 0) {
       throw new Error('No utterances detected in the transcript.');
     }
 
@@ -213,27 +248,19 @@ async function processYouTubeTranscript(youtubeUrl: string) {
       text: utterance.transcript
     }));
 
-    console.log('Cleaning transcript with Gemini AI...');
+    console.log(`[${requestId}] Found ${segments.length} transcript segments`);
+    console.log(`[${requestId}] Cleaning transcript with Gemini AI...`);
     
     // Try Gemini cleaning first, fallback to simple cleaning if it fails
     let cleanedSegments: CleanedSegment[];
     try {
       cleanedSegments = await cleanTranscriptWithGemini(segments);
     } catch (error) {
-      console.log('Gemini cleaning failed, using simple cleaning...');
+      console.log(`[${requestId}] Gemini cleaning failed, using simple cleaning...`);
       cleanedSegments = simpleCleanTranscript(segments);
     }
 
-    console.log('\n--- Original Segmented Transcript ---');
-    segments.forEach((seg, idx) => {
-      console.log(`[${idx + 1}] ${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s: ${seg.text}`);
-    });
-
-    console.log('\n--- Cleaned Segmented Transcript ---');
-    cleanedSegments.forEach((seg, idx) => {
-      console.log(`[${idx + 1}] ${seg.start.toFixed(2)}s - ${seg.end.toFixed(2)}s:`);
-      console.log(`   Cleaned:  ${seg.cleanedText}`);
-    });
+    console.log(`[${requestId}] Transcript processing completed successfully`);
 
     return {
       success: true,
@@ -241,21 +268,18 @@ async function processYouTubeTranscript(youtubeUrl: string) {
         videoUrl: youtubeUrl,
         cleanedSegments: cleanedSegments,
         totalDuration: segments.length > 0 ? segments[segments.length - 1].end : 0,
-        segmentCount: segments.length
+        segmentCount: segments.length,
+        audioSize: `${(audioBuffer.length / 1024 / 1024).toFixed(2)}MB`
       }
     };
 
-  } catch (err) {
-    console.error('Error:', err);
+  } catch (err: any) {
+    console.error(`[${requestId}] Error:`, err);
     return {
       success: false,
-      error: err instanceof Error ? err.message : 'Unknown error occurred'
+      error: err instanceof Error ? err.message : 'Unknown error occurred',
+      requestId
     };
-  } finally {
-    // Clean up
-    if (fs.existsSync(audioPath)) {
-      fs.unlinkSync(audioPath);
-    }
   }
 }
 
@@ -298,6 +322,8 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    console.log('Processing request for:', youtubeUrl);
+
     // Process the YouTube transcript
     const result = await processYouTubeTranscript(youtubeUrl);
 
@@ -307,14 +333,19 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(result, { status: 500 });
     }
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('API Route Error:', error);
     return NextResponse.json(
       { 
         success: false, 
-        error: error instanceof Error ? error.message : 'Internal server error' 
+        error: error instanceof Error ? error.message : 'Internal server error',
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       },
       { status: 500 }
     );
   }
 }
+
+// Configure the API route
+export const runtime = 'nodejs';
+export const maxDuration = 300; // 5 minutes max execution time
